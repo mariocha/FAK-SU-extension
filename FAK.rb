@@ -17,385 +17,323 @@ v0.02 20090208
 2 autosmooth
 =end
 
-module WikiiFAK
-
+module F3DFAK
+VERSION = 'dev155'
   class Face
-    def center_position
-      positions = vertices.map(&:position)
-      return Geom::Point3d.new(0, 0, 0) if positions.empty?
-      
-      sum_x = sum_y = sum_z = 0
-      positions.each do |pos|
-        sum_x += pos.x
-        sum_y += pos.y
-        sum_z += pos.z
-      end
-      
-      count = positions.length.to_f
-      Geom::Point3d.new(sum_x / count, sum_y / count, sum_z / count)
+
+    def wi_center
+      vertices_positions = vertices.map { |vertex| vertex.position }
+      vx = vertices_positions.map { |point| point.x }.wi_average
+      vy = vertices_positions.map { |point| point.y }.wi_average
+      vz = vertices_positions.map { |point| point.z }.wi_average
+      Geom::Point3d.new([vx, vy, vz])
     end
   end
 
-  class Array
-    def average
-      return 0 if empty?
-      sum(0) / length.to_f
-    end
-  end
+  class Follow_me_keep_z
+    @wikii_push_pull_recodes = []
+    @wikii_push_pull_rotate = 0.0
+    @wikii_push_pull_rotate_step = false
+    @wikii_push_pull_scale = 1.0
+    @wikii_push_pull_z = false
 
-  class FollowMeKeepZ
-    def initialize
-      @records = []
-      @rotation = 0.0
-      @rotation_step = false
-      @scale = 1.0
-      @preserve_z = false
+    def wi_average
+      result = 0
+      each { |value| result += value }
+      result / length
     end
 
     def sort_edges(edges)
-      return [] if edges.empty?
-      
+      return if edges.empty?
+
       result = []
-      remaining_edges = edges.dup
-      
-      while remaining_edges.any?
-        start_vertex = find_path_start(remaining_edges)
+
+      while edges.length != 0
+        start = nil
+
+        edges.each do |edge|
+          start = edge.start
+          break if (edge.start.edges & edges).length == 1
+
+          start = edge.end
+          break if (edge.end.edges & edges).length == 1
+        end
+
         vertices = []
         curve = []
-        current = start_vertex
 
-        while current
-          next_edge = (current.edges & remaining_edges - curve).first
+        while start
+          next_edge = (start.edges & edges - curve)[0]
+
           if next_edge
             curve << next_edge
-            vertices << current
-            current = next_edge.other_vertex(current)
+            vertices << start
+            start = next_edge.other_vertex(start)
           else
-            vertices << current
-            current = nil
+            vertices << start
+            start = nil
           end
         end
 
-        remaining_edges -= curve
+        edges -= curve
         result << [curve, vertices]
       end
-      
+
       result
     end
 
-    private
-
-    def find_path_start(edges)
-      edges.each do |edge|
-        return edge.start if (edge.start.edges & edges).length == 1
-        return edge.end if (edge.end.edges & edges).length == 1
-      end
-      edges.first.start
-    end
-
-    def get_selection_by_type(selection, type)
-      case type
-      when :faces
-        selection.grep(Sketchup::Face)
-      when :edges
-        selection.grep(Sketchup::Edge)
-      when :construction_points
-        selection.grep(Sketchup::ConstructionPoint)
-      else
-        []
-      end
-    end
-
-    def create_path_vertices(edges)
-      return [] if edges.empty?
-      edges[-1][1].map(&:position)
-    end
-
-    def is_closed_path?(path_vertices)
-      return false if path_vertices.empty?
-      path_vertices.first == path_vertices.last
-    end
-
-    def find_center_point(face, path_vertices, construction_points, closed_path)
-      return construction_points.first.position if construction_points.any?
-
-      case true
-      when closed_path
-        path_vertices.each { |v| return v if face.vertices.map(&:position).include?(v) }
-        face.center_position
-      when face.vertices.map(&:position).include?(path_vertices.first)
-        path_vertices.first
-      when face.vertices.map(&:position).include?(path_vertices.last)
-        path_vertices.last
-      else
-        face.center_position
-      end
-    end
-
-    def rotate_path_to_nearest_vertex(path_vertices, center_point, closed_path)
-      return path_vertices unless closed_path
-
-      vertices_without_duplicate = path_vertices[0..-2]
-      distances_with_indices = vertices_without_duplicate.each_with_index.map do |v, idx|
-        [v.distance(center_point), idx]
-      end.sort_by { |d, _| d }
-
-      nearest_index = distances_with_indices.first[1]
-      rotated = vertices_without_duplicate[nearest_index..-1] + vertices_without_duplicate[0..nearest_index]
-      rotated.uniq!
-      rotated << rotated.first
-      rotated
-    end
-
-    def reverse_path_if_needed(path_vertices, center_point)
-      return path_vertices if path_vertices.length < 2
-      
-      if path_vertices.first.distance(center_point) > path_vertices.last.distance(center_point)
-        path_vertices.reverse
-      else
-        path_vertices
-      end
-    end
-
-    def translate_path_to_origin(path_vertices, center_point)
-      translation_vector = center_point - path_vertices.first
-      path_vertices.map { |v| v + translation_vector }
-    end
-
-    def auto_rotate_face_to_path(face, path_vertices)
-      return unless path_vertices.length > 1
-
-      path_direction = path_vertices[1] - path_vertices.first
-      face_normal = face.normal.dup
-
-      if face_normal.angle_between(path_direction) > (Math::PI / 2)
-        face.reverse!
-      end
-
-      # Align face to path
-      align_face_normal_to_path(face, path_direction, path_vertices.first)
-    end
-
-    def align_face_normal_to_path(face, path_direction, alignment_point)
-      path_dir_horizontal = path_direction.dup
-      path_dir_horizontal.z = 0
-      
-      face_normal_horizontal = face.normal.dup
-      face_normal_horizontal.z = 0
-
-      return if face_normal_horizontal.length == 0
-
-      perpendicular = face_normal_horizontal * path_dir_horizontal
-      return if perpendicular.length == 0
-
-      angle = path_dir_horizontal.angle_between(face_normal_horizontal)
-      transformation = Geom::Transformation.rotation(alignment_point, perpendicular, angle)
-
-      face.vertices.each do |v|
-        v.position = v.position.transform(transformation)
-      end
-    end
-
-    def calculate_intersection_plane(vertices, path_segment_start, preserve_z)
-      v_previous = vertices[-2]
-      v_current = vertices[0]
-      v_next = vertices[1]
-
-      vector_a = (v_previous - v_current).dup
-      vector_b = (v_next - v_current).dup
-
-      vector_a.z = 0 if preserve_z
-      vector_b.z = 0 if preserve_z
-
-      vector_a.length = vector_b.length = 1
-
-      cross_product = vector_a * vector_b
-      
-      if cross_product.length == 0
-        normal = vector_a
-        normal.z = 0 if preserve_z
-      else
-        combined = Geom::Vector3d.linear_combination(1, vector_a, 1, vector_b)
-        cross = vector_a * vector_b
-        normal = combined * cross
-        normal = combined if normal.length == 0
-      end
-
-      [path_segment_start, normal]
-    end
-
-    def project_vertices_onto_plane(vertices, plane, preserve_z)
-      vertices.map do |v|
-        projection = Geom.intersect_line_plane([v, plane.last], plane)
-        projection || v
-      end
-    end
-
-    def create_face_at_path_segment(group, projected_vertices)
-      group.add_face(projected_vertices)
-    end
-
-    def create_connecting_edges(group, original_vertices, projected_vertices, closed_path)
-      edges = []
-      
-      original_vertices.each_with_index do |orig_v, idx|
-        edges << group.add_line(orig_v, projected_vertices[idx])
-        edges.last.find_faces
-        
-        next_idx = (idx + 1) % projected_vertices.length
-        edges << group.add_line(orig_v, projected_vertices[next_idx])
-        edges.last.find_faces
-      end if closed_path
-
-      edges
-    end
-
-    def apply_rotation(group, face, transformation_point, rotation_amount)
-      return if rotation_amount == 0
-      
-      normal = face.normal
-      transformation = Geom::Transformation.rotation(transformation_point, normal, rotation_amount)
-      group.transform_entities(transformation, face)
-    end
-
-    def apply_scale(group, face, transformation_point, scale_amount)
-      return if scale_amount == 1
-      
-      transformation = Geom::Transformation.scaling(transformation_point, scale_amount)
-      group.transform_entities(transformation, face)
-    end
-
-    def apply_z_translation(group, face, z_offset)
-      return if z_offset == 0
-      
-      translation = Geom::Transformation.translation(Geom::Vector3d.new(0, 0, z_offset))
-      group.transform_entities(translation, face)
-    end
-
-    def smooth_edges(edges, non_smooth_edges)
-      (edges - non_smooth_edges).each do |edge|
-        edge.smooth = edge.soft = true if edge.typename == "Edge"
-      end
-    end
-
-    public
-
     def wikii_push_pull
-      @records = []
-      
-      model = Sketchup.active_model
-      selection = model.selection
-      
-      model.start_operation("wikii_push_pull")
+      @wikii_push_pull_recodes = []
+      Sketchup.active_model.start_operation("wikii_push_pull")
 
-      faces = get_selection_by_type(selection, :faces)
+      selection = Sketchup.active_model.selection
+      faces = selection.grep(Sketchup::Face)
       return if faces.empty?
 
-      all_edges = get_selection_by_type(selection, :edges)
-      face_edges = faces.flat_map(&:edges).uniq
-      edges_to_process = all_edges - face_edges
-      edges_to_process = sort_edges(edges_to_process).sort_by { |e| e.first.length }
+			edges = selection.grep(Sketchup::Edge)
+			edges = edges - faces.flat_map { |face| face.edges }.flatten
+			edges = sort_edges(edges)
+			return if edges.nil? || edges.empty?
+			edges = edges.sort { |x, y| x[0].length <=> y[0].length }
+			path_entry = edges[-1]
 
-      construction_points = get_selection_by_type(selection, :construction_points)
+			construction_points = selection.grep(Sketchup::ConstructionPoint)
 
-      path_vertices = create_path_vertices(edges_to_process)
-      closed_path = is_closed_path?(path_vertices)
+			path_vertex_refs = path_entry[1]
+			curve_vertices = path_vertex_refs.map { |vertex| vertex.position }
+			path_start = curve_vertices[0]
+			path_end = curve_vertices[-1]
+			closed_path = path_start == path_end
 
-      @rotation_step = true
-      @rotation = 0
-      @scale = 1
-      @preserve_z = true
+      @wikii_push_pull_rotate_step = true
+      @wikii_push_pull_rotate = 0
+      @wikii_push_pull_scale = 1
+      @wikii_push_pull_z = true
 
-      rotation_step_amount = @rotation / (@rotation_step ? 1 : path_vertices.length - 1)
+      wikii_push_pull_step_rotate = @wikii_push_pull_rotate / (@wikii_push_pull_rotate_step ? 1 : curve_vertices.length - 1)
 
       faces.each do |face|
-        path_vertices = create_path_vertices(edges_to_process)
-        
-        center_point = find_center_point(face, path_vertices, construction_points, closed_path)
-        path_vertices = rotate_path_to_nearest_vertex(path_vertices, center_point, closed_path)
-        path_vertices = reverse_path_if_needed(path_vertices, center_point)
-        path_vertices = translate_path_to_origin(path_vertices, center_point)
+      	path_vertex_refs = path_entry[1]
+        curve_vertices = path_vertex_refs.map { |vertex| vertex.position }
 
-        face_vertices = face.vertices.map(&:position)
-        
-        auto_rotate_face_to_path(face, path_vertices)
+        # determine path/profile anchor point
+        face_center = nil
 
-        group = model.active_entities.add_group
-        group_entities = group.entities
-        
-        if closed_path
-          plane = calculate_intersection_plane(path_vertices, path_vertices.first, @preserve_z)
-          projected_vertices = project_vertices_onto_plane(face_vertices, plane, @preserve_z)
+        if !construction_points.empty?
+          face_center = construction_points[0].position
         else
-          projected_vertices = face_vertices
+          case true
+						when closed_path
+							path_vertex_refs.each { |vertex| face_center = vertex.position if vertex.faces.include?(face) }
+							face_center = face.wi_center unless face_center
+						when path_vertex_refs[0].faces.include?(face)
+							face_center = path_vertex_refs[0].position
+						when path_vertex_refs[-1].faces.include?(face)
+							face_center = path_vertex_refs[-1].position
+						else
+							face_center = face.wi_center
+						end
         end
 
-        new_face = create_face_at_path_segment(group_entities, projected_vertices)
-        group_entities.add_cpoint(center_point)
-        
-        face_vertices = projected_vertices
-        non_smooth_edges = []
-        non_smooth_edges_last = []
-
-        path_vertices.each_with_index do |current_vertex, idx|
-          next if idx == path_vertices.length - 1
-
-          if idx == path_vertices.length - 2
-            if closed_path
-              next_vertex = path_vertices[idx + 1]
-              next_next_vertex = path_vertices[1]
-              
-              face_vertices.each_index do |vi|
-                edge = group_entities.add_line(face_vertices[vi], projected_vertices[vi])
-                non_smooth_edges << edge
-                edge.find_faces
-                
-                edge = group_entities.add_line(face_vertices[vi], projected_vertices[(vi + 1) % projected_vertices.length])
-                edge.find_faces
-              end
-              break
-            else
-              next_vertex = path_vertices[idx + 1]
-              direction = next_vertex - current_vertex
-              direction.z = 0 if @preserve_z
-              next_next_vertex = next_vertex + direction
-            end
-          else
-            next_vertex = path_vertices[idx + 1]
-            next_next_vertex = path_vertices[idx + 2]
-          end
-
-          plane = calculate_intersection_plane([current_vertex, next_vertex, next_next_vertex], next_vertex, @preserve_z)
-          face_vertices = project_vertices_onto_plane(face_vertices, plane, @preserve_z)
-
-          new_face.erase! if !new_face.deleted? && idx != 0
-          new_face = create_face_at_path_segment(group_entities, face_vertices)
-          non_smooth_edges_last = new_face.edges
-          
-          @records << [group, new_face.edges, next_vertex, plane.last]
-
-          new_face.edges.each(&:find_faces)
-
-          apply_rotation(group, new_face, next_vertex, rotation_step_amount) if @rotation != 0
-          apply_scale(group, new_face, next_vertex, @scale) if @scale != 1
-          apply_z_translation(group, new_face, next_vertex.z - current_vertex.z) if @preserve_z
+        # determine path start point
+        if closed_path
+          n = -1
+          curve_vertices = curve_vertices[0..-2]
+          min = curve_vertices.map { |point| n += 1; [point.distance(face_center), n] }.sort { |x, y| x[0] <=> y[0] }[0][1]
+#          p min
+          curve_vertices = curve_vertices[min..-1] + curve_vertices[0..min]
+          curve_vertices.uniq!
+          curve_vertices << curve_vertices[0]
+        else
+          curve_vertices.reverse! if path_start.distance(face_center) > path_end.distance(face_center)
         end
 
-        smooth_edges(group_entities.to_a, non_smooth_edges + non_smooth_edges_last)
+        translation = face_center - curve_vertices[0]
+        curve_vertices.map! { |point| point + translation }
+
+face_vertices = face.vertices.map { |vertex| vertex.position }
+
+# align profile to path
+v1 = curve_vertices[1] - curve_vertices[0]
+face_normal = face.normal
+v2 = face_normal
+
+if face_normal.angle_between(v1) > Math::PI / 2
+  face.reverse!
+  v2 = face.normal
+end
+
+v1.z = 0
+v2.z = 0
+next if v2.length == 0
+
+v3 = v2 * v1
+
+if v3.length != 0
+  t = Geom::Transformation.rotation(face_center, v3, v1.angle_between(v2))
+  face_vertices.map! { |point| point.transform(t) }
+  v2 = face.normal.transform(t)
+  v3 = v2 * v1
+
+  if v3.length != 0
+    t = Geom::Transformation.rotation(face_center, v3, v1.angle_between(v2))
+    face_vertices.map! { |point| point.transform(t) }
+  end
+end
+
+group_entities = Sketchup.active_model.active_entities.add_group.entities
+temp_vertices = []
+
+if closed_path
+  v1 = curve_vertices[-2]
+  v2 = curve_vertices[0]
+  v3 = curve_vertices[1]
+
+  vca = (v1 - v2)
+  vcb = (v3 - v2)
+
+  vca.z = 0 if @wikii_push_pull_z
+  vcb.z = 0 if @wikii_push_pull_z
+  vca.length = vcb.length = 1
+
+  if (vca * vcb).length == 0
+    normal = vca
+  else
+    vc1 = Geom::Vector3d.linear_combination(1, vca, 1, vcb)
+    vc2 = vca * vcb
+    normal = vc1 * vc2
+    normal = vc1 if normal.length == 0
+  end
+
+  plane = [curve_vertices[0], normal]
+
+  face_vertices.each do |point|
+    st1 = Geom.intersect_line_plane([point, curve_vertices[1] - curve_vertices[0]], plane)
+    temp_vertices << st1
+  end
+else
+  face_vertices.each do |point|
+    temp_vertices << point
+  end
+end
+
+new_face = group_entities.add_face(temp_vertices)
+group_entities.add_cpoint(face_center)
+
+@fvs = face_vertices = temp_vertices
+edges_not_smooth = []
+edges_not_smooth_last = []
+
+curve_vertices_length = curve_vertices.length
+
+curve_vertices.each_index do |index|
+  v1 = curve_vertices[index]
+  v2 = nil
+  v3 = nil
+
+  case true
+  when index == curve_vertices_length - 1
+    next
+  when index == curve_vertices_length - 2
+
+    if closed_path
+      v2 = curve_vertices[index + 1]
+      v3 = curve_vertices[1]
+
+      face_vertices.each_index do |ii|
+        edges_not_smooth << (y = group_entities.add_line(face_vertices[ii], @fvs[ii]))
+        y.find_faces
+        y = group_entities.add_line(face_vertices[ii], @fvs[(ii + 1) - @fvs.length])
+        y.find_faces
+      end
+
+      break
+    else
+      v2 = curve_vertices[index + 1]
+      vect = v2 - v1
+      vect.z = 0 if @wikii_push_pull_z
+      v3 = v2 + vect
+    end
+  else
+    v2 = curve_vertices[index + 1]
+    v3 = curve_vertices[index + 2]
+  end
+
+  vca = (v1 - v2)
+  vcb = (v3 - v2)
+
+  vca.z = 0 if @wikii_push_pull_z
+  vcb.z = 0 if @wikii_push_pull_z
+
+  if vca.length != 0
+    vca.length = 1
+  end
+
+  if vcb.length != 0
+    vcb.length = 1
+  end
+
+		cross = vca * vcb
+		if cross.length == 0
+		normal = vca
+		normal.z = 0 if @wikii_push_pull_z
+		plane = [v2, normal]
+		else
+		vx = cross
+		vx = Geom::Vector3d.new(0, 0, 1) if @wikii_push_pull_z
+		va = vca + vcb
+		normal = va * vx
+    normal.z = 0 if @wikii_push_pull_z
+    plane = [v2, normal]
+  end
+
+  segment_vector = v2 - v1
+
+  face_vertices = face_vertices.map do |vertex_or_point|
+    vertex_or_point = vertex_or_point.position if vertex_or_point.class == Sketchup::Vertex
+    p_normal = segment_vector.clone
+    p_normal.z = 0 if @wikii_push_pull_z
+    y = Geom.intersect_line_plane([vertex_or_point, p_normal], plane)
+    edges_not_smooth << group_entities.add_line(vertex_or_point, y)
+    y # intersection_point
+  end
+
+  new_face_center = Geom.intersect_line_plane([face_center, segment_vector], plane)
+
+  new_face.erase! if !new_face.deleted? and index != 0
+  new_face = group_entities.add_face(face_vertices)
+  edges_not_smooth_last = new_face.edges
+  @wikii_push_pull_recodes << [group_entities, new_face.edges, new_face_center, normal]
+  new_face.edges.each { |edge| edge.find_faces }
+
+  if @wikii_push_pull_rotate != 0
+    t = Geom::Transformation.rotation(new_face_center, normal, wikii_push_pull_step_rotate)
+    group_entities.transform_entities(t, new_face)
+  end
+
+  if @wikii_push_pull_scale != 1
+    t = Geom::Transformation.scaling(new_face_center, @wikii_push_pull_scale)
+    group_entities.transform_entities(t, new_face)
+  end
+
+  if @wikii_push_pull_z
+    t = Geom::Transformation.translation(Geom::Vector3d.new(0, 0, v2.z - v1.z))
+    group_entities.transform_entities(t, new_face)
+  end
+
+  face_vertices = new_face.vertices
+  face_center = new_face_center
+end
+        (group_entities.to_a - edges_not_smooth - edges_not_smooth_last).each do |entity|
+          entity.smooth = entity.soft = true if entity.typename == "Edge"
+        end
+
         new_face.erase! if closed_path
       end
 
-      model.commit_operation
+      Sketchup.active_model.commit_operation
     end
-  end
 
-  if !(defined? Sutool)
-    if !file_loaded?("FAK.rb")
-      add_separator_to_menu("Plugins")
-      UI.menu("Plugins").add_item(FakLH['FollowMeAndKeep']) do
-        FollowMeKeepZ.new.wikii_push_pull
-      end
-    end
-    file_loaded("FAK.rb")
+   puts "version #{VERSION}"
   end
 end
